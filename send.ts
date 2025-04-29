@@ -1,5 +1,4 @@
 // 实现发送 bark 通知
-import axios from 'axios';
 import dotenv from 'dotenv';    
 dotenv.config();
 
@@ -14,13 +13,11 @@ export const sendNotification = async ({
     isVerification,
     verificationCode,
     verificationLink,
-    message,
     sender
 }: {
     isVerification: boolean,
     verificationCode?: string,
     verificationLink?: string,
-    message?: string,
     sender: string
 }) => { 
     if (isVerification) {
@@ -55,8 +52,8 @@ export const sendAutoCopyBark = async ({
     copy: string,
     body?: string
 }) => {
-  const response = await axios.get(`${barkUrl}${barkKey}/${title}/${body}?copy=${copy}&autoCopy=1`);
-  return response.data;
+  const response = await fetch(`${barkUrl}${barkKey}/${title}/${body}?copy=${copy}&autoCopy=1`);
+  return response.json();
 };
 
 
@@ -69,8 +66,7 @@ export const sendOpenUrlBark = async ({
     url: string,
     body: string
 }) => {
-
-    const response = await axios.get(`${barkUrl}${barkKey}/${title}/${body}/${url}`);
-    return response.data;
+    const response = await fetch(`${barkUrl}${barkKey}/${title}/${body}/${url}`);
+    return response.json();
 };
     

@@ -175,11 +175,11 @@ async function main() {
         await handleNewEmails(client);
         
         // 等待一段时间后再次检查
-        await new Promise(resolve => setTimeout(resolve, 5000));
+        await new Promise(resolve => setTimeout(resolve, 2000));
       } catch (err) {
         console.error('检查新邮件时出错:', err);
         // 等待一段时间后重试
-        await new Promise(resolve => setTimeout(resolve, 5000));
+        await new Promise(resolve => setTimeout(resolve, 2000));
       }
     }
   } catch (err: unknown) {
