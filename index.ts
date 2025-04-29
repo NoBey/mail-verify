@@ -1,7 +1,7 @@
 import dotenv from 'dotenv';
 dotenv.config();
 
-import Imap from 'imap';
+import { ImapFlow } from 'imapflow';
 import { simpleParser } from 'mailparser';
 import { Readable } from 'stream';
 import { sendNotification } from './send';
@@ -59,99 +59,133 @@ async function parseEmail({ subject, content }: { subject: string, content: stri
     }
   }
 
-
 // 配置IMAP连接
-const imapConfig = {
-  user: process.env.EMAIL_USER || '', // 你的QQ邮箱地址
-  password: process.env.EMAIL_PASSWORD || '', // 你的QQ邮箱授权码
+const client = new ImapFlow({
   host: process.env.IMAP_HOST || 'imap.qq.com',
   port: parseInt(process.env.IMAP_PORT || '993'),
-  tls: true,
-  tlsOptions: { rejectUnauthorized: true }
-};
-
-// 创建IMAP实例
-const imap = new Imap(imapConfig);
-
-// 解析邮件内容的函数
-function openInbox(cb: (err: Error | null, mailbox: any) => void) {
-  imap.openBox('INBOX', false, cb);
-}
+  secure: true,
+  auth: {
+    user: process.env.EMAIL_USER || '',
+    pass: process.env.EMAIL_PASSWORD || ''
+  },
+  logger: false
+});
 
 // 监听错误事件
-imap.once('error', (err: Error) => {
+client.on('error', (err: Error) => {
   console.log('IMAP错误：', err);
 });
 
 // 监听结束事件
-imap.once('end', () => {
+client.on('close', () => {
   console.log('IMAP连接已关闭');
 });
 
-// 监听就绪事件
-imap.once('ready', () => {
-  console.log('IMAP连接已建立');
-  
-  openInbox((err, mailbox) => {
-    if (err) {
-      console.log('打开收件箱失败：', err);
-      return;
-    }
-    
-    console.log('收件箱已打开');
-    console.log(`收件箱总邮件数: ${mailbox.messages.total}`);
+// 存储已处理过的邮件ID
+const processedMessageIds = new Set<number>();
 
-    // 监听新邮件
-    imap.on('mail', (numNewMsgs: number) => {
-      console.log(`收到 ${numNewMsgs} 封新邮件`);
-      
-      // 获取最新邮件
-      const fetch = imap.seq.fetch(`${mailbox.messages.total - numNewMsgs + 1}:*`, {
-        bodies: '',
-        struct: true
+// 处理新邮件
+async function handleNewEmails(client: ImapFlow) {
+  try {
+    const lock = await client.getMailboxLock('INBOX');
+    try {
+      const mailbox = await client.mailboxOpen('INBOX');
+      const currentCount = mailbox.exists;
+      console.log(`检查新邮件，当前邮件数: ${currentCount}`);
+
+      // 获取最新的邮件
+      const messages = await client.fetch(`${currentCount}:*`, {
+        envelope: true,
+        bodyStructure: true,
+        source: true,
+        uid: true
       });
 
-      fetch.on('message', (msg, seqno) => {
-        console.log(`处理邮件 #${seqno}`);
+      for await (const message of messages) {
+        // 如果已经处理过这个邮件，跳过
+        if (processedMessageIds.has(message.uid)) {
+          continue;
+        }
 
-        msg.on('body', (stream, info) => {
-          // 使用 mailparser 解析邮件内容
-          const chunks: Buffer[] = [];
-          
-          stream.on('data', (chunk) => {
-            chunks.push(chunk);
-          });
-          
-          stream.once('end', async () => {
-            const buffer = Buffer.concat(chunks);
-            const parsed = await simpleParser(Readable.from(buffer));
-            
-            console.log('---------------------------');
-            console.log(`发件人: ${String(parsed.from || '未知')}`);
-            console.log(`收件人: ${String(parsed.to || '未知')}`);
-            console.log(`主题: ${parsed.subject || '无主题'}`);
-            console.log(`日期: ${parsed.date?.toLocaleString() || '未知'}`);
-            console.log(`正文: ${parsed.text?.substring(0, 100)}...`);
-            console.log('---------------------------');
+        console.log(`处理新邮件 #${message.uid}`);
+        processedMessageIds.add(message.uid);
+        
+        const parsed = await simpleParser(Readable.from(message.source));
+        
+        console.log('---------------------------');
+        console.log(`发件人: ${String(parsed.from || '未知')}`);
+        console.log(`收件人: ${String(parsed.to || '未知')}`);
+        console.log(`主题: ${parsed.subject || '无主题'}`);
+        console.log(`日期: ${parsed.date?.toLocaleString() || '未知'}`);
+        console.log(`正文: ${parsed.text?.substring(0, 100)}...`);
+        console.log('---------------------------');
 
-            const result = await parseEmail({ subject: parsed.subject || '', content: parsed.text || '' });
-            console.log(result);
-            await sendNotification(result as { isVerification: boolean, verificationCode?: string, verificationLink?: string, message?: string, sender: string })
-          });
+        const result = await parseEmail({ 
+          subject: parsed.subject || '', 
+          content: parsed.text || '' 
         });
-      });
+        console.log(result);
+        await sendNotification(result as { 
+          isVerification: boolean, 
+          verificationCode?: string, 
+          verificationLink?: string, 
+          message?: string, 
+          sender: string 
+        });
+      }
+    } finally {
+      lock.release();
+    }
+  } catch (err: unknown) {
+    console.error('处理新邮件时发生错误:', err);
+  }
+}
 
-      fetch.once('error', (err: Error) => {
-        console.log('获取邮件失败: ', err);
-      });
+// 主函数
+async function main() {
+  try {
+    // 连接到IMAP服务器
+    console.log('正在连接到IMAP服务器...');
+    await client.connect();
+    console.log('IMAP连接已建立');
 
-      fetch.once('end', () => {
-        console.log('所有邮件已获取');
+    // 获取初始邮件ID
+    const lock = await client.getMailboxLock('INBOX');
+    try {
+      const mailbox = await client.mailboxOpen('INBOX');
+      // 获取当前所有邮件的ID
+      const messages = await client.fetch('*', {
+        uid: true
       });
-    });
-  });
-});
+      for await (const message of messages) {
+        processedMessageIds.add(message.uid);
+      }
+      console.log(`已记录 ${processedMessageIds.size} 封现有邮件`);
+    } finally {
+      lock.release();
+    }
 
-// 连接到IMAP服务器
-console.log('正在连接到IMAP服务器...');
-imap.connect();
+    // 定期检查新邮件
+    while (true) {
+      try {
+        // 使用 NOOP 命令触发服务器检查新邮件
+        await client.noop();
+        
+        // 检查新邮件
+        await handleNewEmails(client);
+        
+        // 等待一段时间后再次检查
+        await new Promise(resolve => setTimeout(resolve, 5000));
+      } catch (err) {
+        console.error('检查新邮件时出错:', err);
+        // 等待一段时间后重试
+        await new Promise(resolve => setTimeout(resolve, 5000));
+      }
+    }
+  } catch (err: unknown) {
+    console.error('发生错误:', err);
+  }
+}
+
+// 启动程序
+main();
